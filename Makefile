@@ -1,7 +1,7 @@
 PKG_NAME = ddb_jack
 
-override PREFIX ?= /usr/local
-LIBDIR  ?= $(PREFIX)/lib
+PREFIX ?= /usr/local
+LIBDIR ?= $(PREFIX)/lib
 
 CC     ?= gcc
 CFLAGS += -I$(shell pkg-config --variable=includedir jack)
