@@ -38,7 +38,7 @@
 typedef struct {
 	DB_functions_t *db;
 	jack_client_t *jack;
-	bool connected, clean;
+	bool connected, clean, fulfill;
 	ddb_waveformat_t *fmt;
 	ddb_playback_state_t state;
 	jack_port_t *ports[];
@@ -51,6 +51,7 @@ static ddb_jack_connector con = {
 	.fmt         = &plugin.fmt,
 	.connected   = false,
 	.clean       = true,
+	.fulfill     = true
 };
 
 DB_plugin_t *ddb_jack_load(DB_functions_t *api) {
@@ -60,6 +61,7 @@ DB_plugin_t *ddb_jack_load(DB_functions_t *api) {
 	sigaddset(&set, SIGPIPE);
 	sigprocmask(SIG_BLOCK, &set, 0);
 	con.db = api;
+
 	return DB_PLUGIN (&plugin);
 }
 
@@ -139,8 +141,9 @@ static int jack_proc_cb(jack_nframes_t inframes, void *_) {
 		//        each channel to be written to a separate buffer.
 		switch (con.state) {
 			case DDB_PLAYBACK_STATE_PLAYING: {
-				char buf[inframes * con.fmt->channels * (con.fmt->bps / 8)];
-				int inbytes = con.db->streamer_read(buf, (int) sizeof(buf));
+				int bufsize = (int) inframes * con.fmt->channels * (con.fmt->bps / 8);
+				char buf[bufsize];
+				int inbytes = con.db->streamer_read(buf, bufsize);
 
 				// this avoids a crash if we are playing and change to a plugin
 				// with no valid output and then switch back
@@ -149,15 +152,14 @@ static int jack_proc_cb(jack_nframes_t inframes, void *_) {
 				} else {
 					// this is intended to make playback less jittery in case of
 					// inadequate read from streamer
-//                    while (inbytes < sizeof(buf)) {
-//                        //usleep (100);
-//                        unsigned morebytesread = deadbeef.deadbeef->streamer_read(buf + inbytes,
-//                                                                                  sizeof(buf) - inbytes);
-//                        if (morebytesread != -1) inbytes += morebytesread;
-//                    }
+					while (con.fulfill && inbytes < bufsize) {
+						//usleep (100);
+						trace("Streamer data not aligned: %d, but need %d. Mitigating\n", inbytes, bufsize);
+						int buftail = con.db->streamer_read(buf + inbytes, bufsize - inbytes);
+						if (buftail != EOF) inbytes += buftail;
+					}
 
-					jack_nframes_t outframes =
-						inbytes * 8 / (con.fmt->channels * con.fmt->bps);
+					jack_nframes_t outframes = inbytes * 8 / (con.fmt->channels * con.fmt->bps);
 					float *jack_port_buffer[con.fmt->channels];
 					for (int ch = 0; ch < con.fmt->channels; ++ch) {
 						jack_port_buffer[ch] = jack_port_get_buffer(con.ports[ch], outframes);//inframes);
@@ -204,6 +206,7 @@ static int jack_proc_cb(jack_nframes_t inframes, void *_) {
 static int ddb_jack_init(void) {
 	f_entry ();
 	con.clean = true;
+	con.fulfill = con.db->conf_get_int("jack.fulfill", 1);
 	// create new jack on JACK server
 	jack_status_t status;
 	con.jack = jack_client_open(DB_CLIENT_NAME, JackNullOption | JackNoStartServer, &status);
@@ -289,7 +292,8 @@ static int ddb_jack_setformat(ddb_waveformat_t *fmt) {
 	if (!con.connected) {
 		if (!(result = ddb_jack_init())) {
 			if (con.fmt->samplerate != fmt->samplerate) {
-				con.db->log_detailed(&plugin.plugin, DDB_LOG_LAYER_INFO, "DeaDBeeF's and JACK's sample rates differs, use resample DSP\n");
+				con.db->log_detailed(&plugin.plugin, DDB_LOG_LAYER_INFO,
+				                     "DeaDBeeF's and JACK's sample rates differs, use resample DSP\n");
 			}
 		}
 	}
@@ -308,6 +312,9 @@ static int ddb_playback_play(void) {
 	return 0;
 }
 
+static const char settings_dlg[] =
+	"property \"Fulfill JACK buffer\" checkbox jack.fulfill 1;\n";
+
 // define plugin interface
 static DB_output_t plugin = {
 	DB_PLUGIN_SET_API_VERSION
@@ -319,6 +326,7 @@ static DB_output_t plugin = {
 	.plugin.descr = "plays sound via JACK API",
 	.plugin.copyright = "CopyLeft (C) 2014 -tclover <tokiclover@gmail.com> (mod. sot-tech)",
 	.plugin.website = "https://github.com/sot-tech/deadbeef-plugins-jack",
+	.plugin.configdialog = settings_dlg,
 	.plugin.stop = ddb_jack_free,
 	.free = ddb_jack_free,
 	.init = ddb_jack_init,
